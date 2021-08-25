@@ -1,0 +1,79 @@
+#!/bin/bash
+
+# Env Vars:
+# REGISTRY: name of the image registry/namespace to get the images
+# COS_ID: If set, specifies the full CRN of a Cloud Object Storage instance to
+# use
+
+REGISTRY=${REGISTRY:-ibmcom}
+PROJECT_NAME=$(ibmcloud ce project current | awk '/^Name/{ print $2 }')
+PROJECT_REGION=$(ibmcloud ce project current | \
+  awk -F: '/^Region/{ print $2 }' | sed -e 's/^[[:space:]]*//' -e "s/[[:space:]]*$//")
+POLICY_ID=""
+PROJECT_ID=$(ibmcloud ce project get --name ${PROJECT_NAME} | \
+  awk '/^ID/{ print $2 }')
+
+# Clean up previous run
+function clean() {
+  set +ex
+  echo "Cleaning..."
+  (
+  # Delete the job & config map
+  ibmcloud ce job delete --name ${JOBNAME} --force
+  ibmcloud ce cm delete --name ${CONFIGMAP} --force
+
+  # Empty the COS bucket
+  ibmcloud cos object-delete --bucket ${BUCKET_NAME} --key test-object-from-code-engine --force
+
+  # Delete the COS bucket
+  ibmcloud cos bucket-delete --bucket ${BUCKET_NAME} --force
+
+  # Delete the COS instance unless the instance was given to us
+  if [[ -z "$COS_ID" ]]; then
+    ibmcloud resource service-instance-delete ce-job2cos -f -q
+  fi
+
+  rm -f out .tmpkey
+  ) > /dev/null 2>&1
+}
+
+clean
+[[ "$1" == "clean" ]] && exit 0
+
+set -ex
+
+CID=${COS_ID}
+
+# Create a COS instance unless one has been specified for use
+if [[ -z "$CID" ]]; then
+  ibmcloud resource service-instance-create ce-job2cos \
+    cloud-object-storage standard global
+  CID=$(ibmcloud resource service-instance ce-job2cos | awk '/^ID/{ print $2 }')
+fi
+
+# Set the COS config to use this instance
+ibmcloud cos config crn --crn $CID --force
+
+# Create our buckets
+ibmcloud cos bucket-create --bucket ${BUCKET_NAME} \
+  --ibm-service-instance-id $CID \
+  --region $PROJECT_REGION
+
+# Create a configmap
+COS_REGION=$(ibmcloud cos config list | awk '/Default Region/{ print $3 }')
+ibmcloud ce cm create -n ${CONFIGMAP} \
+  --from-literal COS_BUCKETNAME=${BUCKET_NAME} \
+  --from-literal COS_ENDPOINT=https://s3.direct.${COS_REGION}.cloud-object-storage.appdomain.cloud \
+
+# Create the job
+ibmcloud ce job create -n ${JOBNAME} --image ${REGISTRY}/cos-service-binding \
+  --env-from-configmap ${CONFIGMAP}
+
+# Bind the job to COS
+
+# Run the job to create an object
+
+# Get the object to confirm it was created successfully
+
+# Clean up
+clean
